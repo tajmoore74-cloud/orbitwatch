@@ -1,0 +1,32 @@
+# Slimmed-down kube-prometheus-stack for a single small node (k3s)
+alertmanager:
+  enabled: false
+
+grafana:
+  # adminPassword is set by Terraform (set_sensitive), never stored in this file
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    # Pick up ServiceMonitors from every namespace with this label
+    serviceMonitorSelector:
+      matchLabels:
+        release: monitoring
+
+# k3s bundles these differently; turning them off avoids noisy errors
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false

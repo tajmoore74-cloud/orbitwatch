@@ -1,0 +1,280 @@
+# OrbitWatch pipeline
+#
+#   lint    -> code style, Helm charts, Terraform formatting/validation
+#   test    -> unit tests + orbit accuracy tests (checked against Skyfield)
+#   build   -> container image pushed to the GitLab registry (tagged by commit)
+#   scan    -> Trivy vulnerability scan, SBOM, cosign signature + SBOM attestation
+#   plan    -> terraform plan against the cluster (saved as an artifact)
+#   deploy  -> terraform apply, manual button, main branch only
+#   package -> air-gap deliverables: Zarf package + hand-rolled bundle
+#
+# CI/CD variables (Settings > CI/CD > Variables, masked + protected):
+#   KUBECONFIG_B64          base64 of the target cluster's kubeconfig       (deploy)
+#   GRAFANA_ADMIN_PASSWORD  Grafana admin password, never committed          (deploy)
+#   COSIGN_PRIVATE_KEY      contents of cosign.key (type: File is fine too)  (signing)
+#   COSIGN_PASSWORD         password for cosign.key                          (signing)
+#   COSIGN_PUBLIC_KEY       contents of cosign.pub                           (policy)
+#   ENABLE_SIGNATURE_POLICY "true" to make the cluster reject unsigned images
+#
+# Note: Kaniko's upstream project was archived in 2025; the image still works.
+# A maintained alternative is Buildah (quay.io/buildah/stable).
+
+stages: [lint, test, build, scan, plan, deploy, package]
+
+# Run one pipeline per change (avoid duplicate branch + merge request pipelines)
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE
+  TF_ROOT: terraform/cluster
+  TF_STATE_NAME: orbitwatch
+  TF_HTTP_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${TF_STATE_NAME}
+  SYFT_VERSION: v1.18.1
+  COSIGN_VERSION: v2.4.1
+  ZARF_VERSION: v0.43.0
+
+# Installs a pinned CLI from its GitHub release, so every job uses the same version
+.install-tools: &install-tools
+  - apk add --no-cache bash curl jq
+  - |
+    install_bin() { curl -fsSL -o "/usr/local/bin/$1" "$2" && chmod +x "/usr/local/bin/$1"; }
+
+# ---- lint -------------------------------------------------------------------
+
+python-lint:
+  stage: lint
+  image: python:3.12-slim
+  script:
+    - pip install -q ruff==0.8.6
+    - ruff check app/
+
+helm-lint:
+  stage: lint
+  image:
+    name: alpine/helm:3.16.4
+    entrypoint: [""] # the image's default entrypoint is `helm`, which breaks GitLab's shell
+  script:
+    - helm lint charts/orbitwatch
+    - helm template orbitwatch charts/orbitwatch --set serviceMonitor.enabled=true > /dev/null
+    - helm template orbitwatch charts/orbitwatch --set-file tle.data=app/orbitwatch/data/demo.tle > /dev/null
+    - helm lint charts/orbitwatch-policy --set cosignPublicKey="placeholder"
+
+terraform-validate:
+  stage: lint
+  image:
+    name: hashicorp/terraform:1.9.8
+    entrypoint: [""]
+  script:
+    - terraform fmt -check -recursive terraform/
+    - cd $TF_ROOT && terraform init -backend=false -input=false && terraform validate
+    - cd $CI_PROJECT_DIR/terraform/aws-k3s && terraform init -backend=false -input=false && terraform validate
+
+# ---- test -------------------------------------------------------------------
+
+unit-tests:
+  stage: test
+  image: python:3.12-slim
+  variables:
+    PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+  cache:
+    key: pip-$CI_COMMIT_REF_SLUG
+    paths: [.cache/pip]
+  script:
+    - cd app
+    - pip install -q -r requirements-dev.txt
+    - pytest -q --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: app/report.xml
+
+# ---- build ------------------------------------------------------------------
+# Kaniko builds images without needing Docker-in-Docker or privileged runners.
+# The digest file records the image's exact content hash, so signing and
+# scanning refer to these exact bytes, not a tag that could be moved.
+
+build-image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  script:
+    - |
+      cat > /kaniko/.docker/config.json <<EOF
+      {"auths":{"$CI_REGISTRY":{"username":"$CI_REGISTRY_USER","password":"$CI_REGISTRY_PASSWORD"}}}
+      EOF
+    - >
+      /kaniko/executor
+      --context app
+      --dockerfile app/Dockerfile
+      --build-arg APP_VERSION=$CI_COMMIT_SHORT_SHA
+      --destination $IMAGE:$CI_COMMIT_SHORT_SHA
+      --destination $IMAGE:latest
+      --digest-file $CI_PROJECT_DIR/image-digest.txt
+    - echo "Built $IMAGE@$(cat image-digest.txt)"
+  artifacts:
+    paths: [image-digest.txt]
+
+# ---- scan, SBOM, sign -------------------------------------------------------
+
+container-scan:
+  stage: scan
+  needs: [build-image]
+  image:
+    name: aquasec/trivy:0.57.1
+    entrypoint: [""]
+  variables:
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
+    TRIVY_NO_PROGRESS: "true"
+  script:
+    - trivy image --format table --output trivy-report.txt $IMAGE:$CI_COMMIT_SHORT_SHA
+    - cat trivy-report.txt
+    - trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed $IMAGE:$CI_COMMIT_SHORT_SHA
+  # Shows as a yellow warning instead of blocking the pipeline, since new CVEs in
+  # the base image appear over time. Fix by rebuilding on a patched base image.
+  allow_failure: true
+  artifacts:
+    when: always
+    paths: [trivy-report.txt]
+
+# Software Bill of Materials: a machine-readable list of every package in the
+# image. Federal software buyers increasingly require one with every delivery.
+sbom:
+  stage: scan
+  needs: [build-image]
+  image: alpine:3.20
+  variables:
+    SYFT_REGISTRY_AUTH_AUTHORITY: $CI_REGISTRY
+    SYFT_REGISTRY_AUTH_USERNAME: $CI_REGISTRY_USER
+    SYFT_REGISTRY_AUTH_PASSWORD: $CI_REGISTRY_PASSWORD
+  script:
+    - *install-tools
+    - curl -fsSL https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/syft_${SYFT_VERSION#v}_linux_amd64.tar.gz | tar -xz -C /usr/local/bin syft
+    - syft "$IMAGE@$(cat image-digest.txt)" -o cyclonedx-json=sbom.cdx.json -o table
+  artifacts:
+    paths: [sbom.cdx.json]
+
+# Signs the image digest with cosign and attaches the SBOM as a signed
+# attestation. Uses a key pair (not keyless) on purpose: key-based signatures
+# can be verified inside an air-gapped network with no internet access.
+sign-image:
+  stage: scan
+  needs: [build-image, sbom]
+  image: alpine:3.20
+  script:
+    - *install-tools
+    - install_bin cosign https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64
+    - cosign login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD"
+    - |
+      # Accept the key either as a File-type variable (a path) or as raw contents
+      if [ -f "$COSIGN_PRIVATE_KEY" ]; then KEY_FILE="$COSIGN_PRIVATE_KEY"; else
+        KEY_FILE=/tmp/cosign.key; printf '%s\n' "$COSIGN_PRIVATE_KEY" > "$KEY_FILE"; fi
+    - REF="$IMAGE@$(cat image-digest.txt)"
+    - cosign sign --yes --tlog-upload=false --key "$KEY_FILE" "$REF"
+    - cosign attest --yes --tlog-upload=false --key "$KEY_FILE" --type cyclonedx --predicate sbom.cdx.json "$REF"
+    - echo "Signed $REF and attached its SBOM"
+  rules:
+    - if: $COSIGN_PRIVATE_KEY
+
+# ---- plan / deploy ----------------------------------------------------------
+# NOTE: these jobs connect to your cluster's API from a GitLab runner.
+# GitLab's shared runners are on the public internet, so a home k3s cluster or
+# the aws-k3s cluster (API locked to YOUR IP) won't be reachable from them.
+# Options: register a GitLab Runner on a machine that can reach the cluster
+# (recommended), or temporarily allow the runner's IP. Without KUBECONFIG_B64,
+# these jobs are skipped automatically.
+
+.terraform:
+  image:
+    name: hashicorp/terraform:1.9.8
+    entrypoint: [""]
+  before_script:
+    - echo "$KUBECONFIG_B64" | base64 -d > /tmp/kubeconfig
+    - cd $TF_ROOT
+    - echo 'terraform { backend "http" {} }' > backend.tf
+    - >
+      terraform init -input=false
+      -backend-config="address=$TF_HTTP_ADDRESS"
+      -backend-config="lock_address=$TF_HTTP_ADDRESS/lock"
+      -backend-config="unlock_address=$TF_HTTP_ADDRESS/lock"
+      -backend-config="username=gitlab-ci-token"
+      -backend-config="password=$CI_JOB_TOKEN"
+      -backend-config="lock_method=POST"
+      -backend-config="unlock_method=DELETE"
+  rules:
+    - if: $KUBECONFIG_B64 && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+terraform-plan:
+  extends: .terraform
+  stage: plan
+  script:
+    - >
+      terraform plan -input=false -out=plan.tfplan
+      -var="kubeconfig_path=/tmp/kubeconfig"
+      -var="image_registry=$CI_REGISTRY"
+      -var="image_repository=$CI_PROJECT_PATH"
+      -var="image_tag=$CI_COMMIT_SHORT_SHA"
+      -var="grafana_admin_password=$GRAFANA_ADMIN_PASSWORD"
+      -var="enable_image_signature_policy=${ENABLE_SIGNATURE_POLICY:-false}"
+      -var="cosign_public_key=$COSIGN_PUBLIC_KEY"
+  artifacts:
+    paths: [$TF_ROOT/plan.tfplan]
+    expire_in: 1 day
+
+terraform-apply:
+  extends: .terraform
+  stage: deploy
+  needs: [terraform-plan]
+  script:
+    - terraform apply -input=false plan.tfplan
+  rules:
+    - if: $KUBECONFIG_B64 && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  environment:
+    name: production
+
+# ---- air-gap deliverables ---------------------------------------------------
+
+# Zarf: the open-source tool many defense programs use to ship Kubernetes apps
+# into disconnected networks. Produces one .tar.zst holding the chart, the
+# image, and everything else needed, signed if a cosign key is configured.
+zarf-package:
+  stage: package
+  image: alpine:3.20
+  needs: [build-image, container-scan]
+  script:
+    - *install-tools
+    - install_bin zarf https://github.com/zarf-dev/zarf/releases/download/${ZARF_VERSION}/zarf_${ZARF_VERSION}_Linux_amd64
+    - zarf tools registry login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD"
+    - |
+      if [ -n "$COSIGN_PRIVATE_KEY" ]; then
+        if [ -f "$COSIGN_PRIVATE_KEY" ]; then export SIGNING_KEY="$COSIGN_PRIVATE_KEY"; else
+          export SIGNING_KEY=/tmp/cosign.key; printf '%s\n' "$COSIGN_PRIVATE_KEY" > "$SIGNING_KEY"; fi
+      fi
+    - IMAGE_REF="$IMAGE:$CI_COMMIT_SHORT_SHA" bash scripts/zarf-package.sh
+  artifacts:
+    paths: [dist/zarf-package-orbitwatch-*.tar.zst]
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# The same idea by hand (skopeo + helm + checksums + GPG): shows the mechanics
+# that tools like Zarf automate.
+airgap-bundle:
+  stage: package
+  image: alpine:3.20
+  needs: [build-image, container-scan]
+  script:
+    - apk add --no-cache bash curl tar helm skopeo
+    - IMAGE_REF=$IMAGE:$CI_COMMIT_SHORT_SHA REGISTRY_USER=$CI_REGISTRY_USER REGISTRY_PASS=$CI_REGISTRY_PASSWORD bash scripts/airgap-bundle.sh
+  artifacts:
+    paths: [dist/orbitwatch-airgap-*.tar.gz]
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

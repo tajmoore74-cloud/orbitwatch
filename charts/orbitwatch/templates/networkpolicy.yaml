@@ -1,0 +1,55 @@
+{{- if .Values.networkPolicy.enabled }}
+# Zero-trust networking: block ALL traffic to and from the pods by default,
+# then allow only what OrbitWatch actually needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "orbitwatch.fullname" . }}-default-deny
+  labels:
+    {{- include "orbitwatch.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "orbitwatch.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  # No ingress/egress rules here = deny everything. OrbitWatch makes no
+  # outbound connections at all (orbital data is mounted, not downloaded),
+  # so it needs no egress, not even DNS.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "orbitwatch.fullname" . }}-allow-api
+  labels:
+    {{- include "orbitwatch.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "orbitwatch.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # Clients in the same namespace, plus any namespaces you list
+    - from:
+        - podSelector: {}
+        {{- range .Values.networkPolicy.allowedNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- if .Values.serviceMonitor.enabled }}
+    # Prometheus scraping /metrics from the monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- end }}
+    {{- with .Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

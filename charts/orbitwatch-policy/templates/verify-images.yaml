@@ -1,0 +1,56 @@
+{{- if not .Values.cosignPublicKey }}
+{{- fail "cosignPublicKey is required (contents of cosign.pub)" }}
+{{- end }}
+# Supply-chain security: the cluster refuses to start an OrbitWatch pod unless
+# its image was signed by our pipeline's key (and, optionally, carries the
+# signed SBOM). A tampered or hand-built image never runs.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: orbitwatch-require-signed-images
+  annotations:
+    policies.kyverno.io/title: Require signed OrbitWatch images
+    policies.kyverno.io/category: Supply Chain Security
+spec:
+  validationFailureAction: {{ .Values.failureAction }}
+  webhookTimeoutSeconds: 30
+  background: false
+  rules:
+    - name: verify-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces:
+                {{- toYaml .Values.namespaces | nindent 16 }}
+      verifyImages:
+        - imageReferences:
+            - {{ .Values.imageReference | quote }}
+          # Pin the pod to the verified digest so the tag can't be swapped later
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      {{- .Values.cosignPublicKey | nindent 22 }}
+                    # Signatures were made without the public transparency log,
+                    # so verification works inside an air-gapped network.
+                    rekor:
+                      ignoreTlog: true
+                    ctlog:
+                      ignoreSCT: true
+          {{- if .Values.requireSbomAttestation }}
+          attestations:
+            - type: https://cyclonedx.org/bom
+              attestors:
+                - entries:
+                    - keys:
+                        publicKeys: |-
+                          {{- .Values.cosignPublicKey | nindent 26 }}
+                        rekor:
+                          ignoreTlog: true
+                        ctlog:
+                          ignoreSCT: true
+          {{- end }}

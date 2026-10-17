@@ -1,0 +1,7 @@
+OrbitWatch is deployed.
+
+Try it:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "orbitwatch.fullname" . }} 8080:{{ .Values.service.port }}
+  curl localhost:8080/satellites
+  curl localhost:8080/telemetry/99901
+  curl "localhost:8080/passes/99901?station=colorado-springs"

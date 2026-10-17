@@ -1,0 +1,30 @@
+# Zarf package definition for OrbitWatch.
+#
+# Zarf (https://zarf.dev) is an open-source tool for delivering Kubernetes apps
+# into disconnected, air-gapped, and classified environments. On the connected
+# side, `zarf package create` pulls the image and chart into one archive.
+# On the offline side, `zarf package deploy` pushes the image into Zarf's
+# in-cluster registry and installs the chart. Zarf's admission agent rewrites
+# image references to that internal registry automatically, so the chart
+# needs no air-gap-specific changes.
+#
+# Build with scripts/zarf-package.sh (it fills in the image reference and values).
+kind: ZarfPackageConfig
+metadata:
+  name: orbitwatch
+  description: Satellite tracking and ground-station pass prediction API
+  version: 0.2.0
+
+components:
+  - name: orbitwatch
+    description: OrbitWatch API (Helm chart + container image)
+    required: true
+    charts:
+      - name: orbitwatch
+        version: 0.2.0
+        namespace: orbitwatch
+        localPath: ../charts/orbitwatch
+        valuesFiles:
+          - values.generated.yaml
+    images:
+      - "###ZARF_PKG_TMPL_IMAGE_REF###"

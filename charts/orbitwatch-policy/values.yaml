@@ -1,0 +1,15 @@
+# Images matching this pattern must carry a valid cosign signature
+imageReference: "registry.gitlab.com/your-gitlab-username/orbitwatch*"
+
+# Namespaces the policy applies to
+namespaces:
+  - orbitwatch
+
+# Contents of cosign.pub (required)
+cosignPublicKey: ""
+
+# Enforce = block unsigned images. Audit = allow them but report a violation.
+failureAction: Enforce
+
+# Also require the signed SBOM attestation produced by the pipeline
+requireSbomAttestation: true

@@ -1,0 +1,95 @@
+# ---- Image -----------------------------------------------------------------
+# For an air-gapped cluster, point `registry` at your internal registry
+# (for example "registry.local:5000") and set pullPolicy to IfNotPresent.
+image:
+  registry: registry.gitlab.com
+  repository: your-gitlab-username/orbitwatch
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 2
+
+# ---- Resource management -----------------------------------------------------
+# requests = what the scheduler reserves for the pod
+# limits   = the most the pod is allowed to use
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+# ---- Autoscaling (HorizontalPodAutoscaler) -----------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+# Keep at least one pod running during node maintenance
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+env:
+  LOG_LEVEL: INFO
+
+# ---- Orbital data ------------------------------------------------------------
+# Empty = use the demo TLEs built into the image.
+# Real data:  helm upgrade ... --set-file tle.data=data/current.tle
+tle:
+  data: ""
+
+# Ground stations for pass prediction. Empty = built-in defaults
+# (Colorado Springs, Huntsville, Los Angeles). Example override:
+# stations:
+#   - station_id: colorado-springs
+#     name: Colorado Springs, CO
+#     latitude: 38.8339
+#     longitude: -104.8214
+#     altitude_km: 1.839
+stations: []
+
+# ---- Monitoring --------------------------------------------------------------
+# Requires the Prometheus Operator CRDs (installed by kube-prometheus-stack)
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  labels:
+    release: monitoring
+
+# ---- Network policy (zero trust) -----------------------------------------------
+# Deny all traffic by default; allow only API clients and Prometheus.
+# Requires a CNI that enforces NetworkPolicy (k3s does, via kube-router).
+networkPolicy:
+  enabled: true
+  monitoringNamespace: monitoring
+  allowedNamespaces: []   # e.g. [ground-ops] to let another namespace call the API
+  # Escape hatch for extra ingress rules, e.g. if your network plugin blocks
+  # kubelet health probes:  - from: [{ipBlock: {cidr: 10.0.0.0/24}}]
+  extraIngress: []
+
+# ---- Security ----------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

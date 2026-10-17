@@ -1,0 +1,6 @@
+apiVersion: v2
+name: orbitwatch-policy
+description: Kyverno policy that only allows OrbitWatch images signed with your cosign key
+type: application
+version: 0.1.0
+appVersion: "0.2.0"

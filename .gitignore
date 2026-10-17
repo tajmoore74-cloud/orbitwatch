@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+app/report.xml
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform/cluster/backend.tf
+*.tfvars
+zarf/values.generated.yaml
+cosign.key
