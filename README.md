@@ -1,5 +1,7 @@
 # OrbitWatch
 
+![verify](https://github.com/tajmoore74-cloud/orbitwatch/actions/workflows/verify.yml/badge.svg)
+
 **Satellite tracking and ground-station pass prediction, shipped the way a space/defense
 platform team would ship it:** containerized, deployed to Kubernetes with Helm and
 Terraform, automated with GitLab CI/CD, monitored with Prometheus and Grafana,

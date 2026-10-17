@@ -140,11 +140,17 @@ window, the pass was clipped to the window start without saying so. Passes now c
 - Pipeline structure: every job's stage and `needs` reference is valid.
 - All YAML, JSON, and Terraform (HCL) files parse.
 
-**Not yet verified (network-blocked here; the GitLab pipeline checks these on the first push)**
+**Verified end to end on GitHub Actions** (`.github/workflows/verify.yml`, runs on every push)
 - `docker build` of the image
-- `helm lint` / `helm template` of the chart
-- `terraform fmt -check` / `terraform validate`
-- Syft, cosign, Kyverno, and Zarf against real infrastructure (tool versions are pinned in the pipeline)
+- `helm lint` of both charts, and rendered manifests validated against Kubernetes 1.31 schemas (kubeconform)
+- `terraform fmt -check` and `terraform validate` for both modules; ShellCheck on every script
+- A real k3d cluster: chart installs, pods become ready, API smoke-tested from inside the namespace
+- NetworkPolicy: a pod in another namespace is blocked
+- Syft SBOM, cosign signature + SBOM attestation verified offline, and an unsigned image is rejected
+- `zarf package create` builds the package
 
-If any of these fail on the first run, the error message will point to the exact line.
-Fixing it yourself is great material for interview question 14.
+**Found by this verification:** plain `pytest` (as the README and GitLab job ran it) could not import the
+package; only `python -m pytest` worked. Fixed with `app/pytest.ini`.
+
+**Still not run:** the GitLab pipeline itself, Kyverno enforcing on a live cluster, and a Zarf deploy onto a
+disconnected cluster.
