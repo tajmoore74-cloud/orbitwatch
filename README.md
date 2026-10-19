@@ -12,8 +12,7 @@ disconnected networks with **Zarf**.
 - Predicts **when each satellite passes over a ground station** (AOS / TCA / LOS, max elevation, azimuths), the core scheduling problem in space communications
 - Orbit math is **verified against [Skyfield](https://rhodesmill.org/skyfield/)**, an independent astronomy library, in the test suite
 
-> **Why I built this:** *[Write 2–3 sentences in your own words: what drew you to space
-> communications, what you wanted to learn, and what you'd build next.]*
+> **Why I built this:** to learn platform engineering by doing it end to end: take a real problem from space operations (when can a ground antenna reach a satellite?) and ship it the way a defense platform team would, including testing, security, monitoring, and air-gapped delivery.
 
 ```mermaid
 flowchart LR
